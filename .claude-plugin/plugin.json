@@ -5,6 +5,7 @@
   "author": { "name": "Fausto Núñez Alberro" },
   "homepage": "https://github.com/fnune/git-franken",
   "repository": "https://github.com/fnune/git-franken",
+  "license": "MIT",
   "keywords": [
     "git",
     "branch",

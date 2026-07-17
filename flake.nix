@@ -26,6 +26,8 @@
         meta = {
           description = "Rebuild disposable integration branches from a manifest";
           mainProgram = "git-franken";
+          license = nixpkgs.lib.licenses.mit;
+          homepage = "https://github.com/fnune/git-franken";
         };
       };
     });
@@ -39,7 +41,7 @@
           alejandra --quiet .
           # shellcheck disable=SC2086
           shfmt --write --indent 2 ${shellFiles}
-          prettier --write --log-level warn '**/*.{md,json}'
+          prettier --write --log-level warn '**/*.{md,json,yml,yaml}'
         '';
       });
 
@@ -56,7 +58,7 @@
           # shellcheck disable=SC2086
           shfmt --diff --indent 2 ${shellFiles}
           alejandra --check .
-          prettier --check --log-level warn '**/*.{md,json}'
+          prettier --check --log-level warn '**/*.{md,json,yml,yaml}'
 
           touch "$out"
         '';

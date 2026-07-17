@@ -193,3 +193,10 @@ nix flake check      # tests + lint, against the built package
 `nixpkgs` is this flake's only input, so depending on `git-franken` costs you one
 lock entry and no `follows`. Dev tooling comes from `nixpkgs` directly rather
 than from flake wrappers, because inputs are inherited by every consumer.
+
+CI runs `nix flake check` on `main` and every pull request, which is the same
+command you run locally.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
