@@ -1,0 +1,596 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly PROG="git franken"
+readonly NAMESPACE="franken"
+
+# Must differ from NAMESPACE: git resolves a ref by trying $GIT_DIR/<refname>
+# before $GIT_DIR/refs/heads/<refname>, so a manifest at $GIT_DIR/franken/x
+# would shadow the branch franken/x and make git call it a broken ref.
+readonly STORE="git-franken"
+
+# rerere is forced per-invocation rather than read from user config, so builds
+# replay cached conflict resolutions without the tool mutating global git state.
+readonly RERERE=(-c rerere.enabled=true -c rerere.autoUpdate=true)
+
+die() {
+  printf '%s: %s\n' "$PROG" "$1" >&2
+  exit 1
+}
+
+info() { printf '%s\n' "$1" >&2; }
+
+require_repo() {
+  git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repository"
+}
+
+# --git-dir is worktree-local; only the common dir is shared, which is what
+# makes manifests and the rerere cache visible from every worktree.
+franken_dir() {
+  local common
+  common=$(git rev-parse --git-common-dir)
+  common=$(cd "$common" && pwd)
+  printf '%s/%s\n' "$common" "$STORE"
+}
+
+validate_name() {
+  local name=${1-}
+  [ -n "$name" ] || die "missing manifest name"
+  case "$name" in
+  *[!A-Za-z0-9._-]*) die "invalid name '$name': use letters, digits, '.', '_', '-'" ;;
+  .* | *..*) die "invalid name '$name'" ;;
+  esac
+}
+
+manifest_path() {
+  printf '%s/%s\n' "$(franken_dir)" "$1"
+}
+
+branch_name() {
+  printf '%s/%s\n' "$NAMESPACE" "$1"
+}
+
+require_manifest() {
+  local path
+  path=$(manifest_path "$1")
+  [ -f "$path" ] || die "no manifest '$1' (try: $PROG list)"
+  printf '%s\n' "$path"
+}
+
+ref_exists() {
+  git rev-parse --verify --quiet "$1" >/dev/null 2>&1
+}
+
+detect_trunk() {
+  local head
+  if head=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null); then
+    printf '%s\n' "${head#origin/}"
+    return
+  fi
+  for candidate in main master trunk; do
+    if ref_exists "refs/heads/$candidate"; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  die "cannot detect trunk; add a 'trunk: <branch>' line to the manifest"
+}
+
+MANIFEST_TRUNK=""
+MANIFEST_TIPS=()
+
+parse_manifest() {
+  local path=$1 line value
+  MANIFEST_TRUNK=""
+  MANIFEST_TIPS=()
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%%#*}
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    [ -n "$line" ] || continue
+
+    case "$line" in
+    trunk:*)
+      value=${line#trunk:}
+      value=${value#"${value%%[![:space:]]*}"}
+      value=${value%"${value##*[![:space:]]}"}
+      [ -n "$value" ] || die "empty 'trunk:' in $path"
+      MANIFEST_TRUNK=$value
+      ;;
+    *)
+      MANIFEST_TIPS+=("$line")
+      ;;
+    esac
+  done <"$path"
+
+  [ -n "$MANIFEST_TRUNK" ] || MANIFEST_TRUNK=$(detect_trunk)
+}
+
+validate_manifest() {
+  local name=$1 tip seen=()
+
+  ref_exists "$MANIFEST_TRUNK" || die "trunk '$MANIFEST_TRUNK' does not exist"
+  [ ${#MANIFEST_TIPS[@]} -gt 0 ] || die "manifest '$name' lists no branches"
+
+  for tip in "${MANIFEST_TIPS[@]}"; do
+    ref_exists "$tip" || die "branch '$tip' does not exist (listed in manifest '$name')"
+    case " ${seen[*]-} " in
+    *" $tip "*) die "branch '$tip' listed twice in manifest '$name'" ;;
+    esac
+    seen+=("$tip")
+  done
+}
+
+require_clean_worktree() {
+  [ -z "$(git status --porcelain)" ] ||
+    die "worktree has uncommitted changes; commit or stash first"
+}
+
+merge_in_progress() {
+  [ -e "$(git rev-parse --git-path MERGE_HEAD)" ]
+}
+
+unmerged_paths() {
+  git ls-files --unmerged | awk '{print $4}' | sort -u
+}
+
+checked_out_elsewhere() {
+  local branch=$1 here current path=""
+  here=$(git rev-parse --show-toplevel)
+
+  while IFS= read -r line; do
+    case "$line" in
+    "worktree "*) path=${line#worktree } ;;
+    "branch refs/heads/$branch")
+      [ "$path" = "$here" ] || {
+        printf '%s\n' "$path"
+        return 0
+      }
+      ;;
+    esac
+  done < <(git worktree list --porcelain)
+  return 1
+}
+
+# git merge exits non-zero and says "Automatic merge failed" even when rerere
+# has resolved and staged every path, so only the unmerged-path count can tell
+# a replayed resolution from a conflict that needs a human.
+merge_tip() {
+  local tip=$1 rc=0
+
+  git "${RERERE[@]}" merge --no-ff -m "franken: merge $tip" "$tip" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+
+  merge_in_progress || die "merging '$tip' failed before a merge could start"
+
+  if [ -n "$(unmerged_paths)" ]; then
+    return 1
+  fi
+
+  git "${RERERE[@]}" commit --no-edit --quiet
+  return 0
+}
+
+report_conflict() {
+  local name=$1 tip=$2
+  info ""
+  info "CONFLICT merging '$tip' into $(branch_name "$name")."
+  info "Unresolved:"
+  unmerged_paths | sed 's/^/  /' >&2
+  info ""
+  info "Resolve them, 'git add' each, then: $PROG continue $name"
+  info "Your resolution is cached, so future rebuilds replay it automatically."
+}
+
+merge_remaining() {
+  local name=$1 tip merged=0
+
+  for tip in "${MANIFEST_TIPS[@]}"; do
+    if git merge-base --is-ancestor "$tip" HEAD 2>/dev/null; then
+      info "  skipped $tip (already merged)"
+      continue
+    fi
+
+    if ! merge_tip "$tip"; then
+      report_conflict "$name" "$tip"
+      return 1
+    fi
+
+    merged=$((merged + 1))
+    info "  merged $tip"
+  done
+
+  info ""
+  info "Built $(branch_name "$name"): $merged merges on top of $MANIFEST_TRUNK"
+}
+
+cmd_new() {
+  local name=${1-}
+  validate_name "$name"
+  shift || true
+
+  local path
+  path=$(manifest_path "$name")
+  [ ! -f "$path" ] || die "manifest '$name' already exists"
+
+  mkdir -p "$(franken_dir)"
+  {
+    printf '# Integration branch: %s\n' "$(branch_name "$name")"
+    printf '# One branch per line. Rebuild with: %s build %s\n' "$PROG" "$name"
+    printf 'trunk: %s\n' "$(detect_trunk)"
+    local tip
+    for tip in "$@"; do printf '%s\n' "$tip"; done
+  } >"$path"
+
+  info "Created $path"
+  [ "$#" -gt 0 ] || info "Add branches with: $PROG add $name <branch>..."
+}
+
+cmd_list() {
+  local dir
+  dir=$(franken_dir)
+  [ -d "$dir" ] || {
+    info "no manifests yet (create one: $PROG new <name>)"
+    return 0
+  }
+
+  local found=0 path name
+  for path in "$dir"/*; do
+    [ -f "$path" ] || continue
+    found=1
+    name=$(basename "$path")
+    if ref_exists "refs/heads/$(branch_name "$name")"; then
+      printf '%s\t(built)\n' "$name"
+    else
+      printf '%s\t(not built)\n' "$name"
+    fi
+  done
+  [ "$found" -eq 1 ] || {
+    info "no manifests yet (create one: $PROG new <name>)"
+    return 0
+  }
+
+  print_footprint
+}
+
+franken_branches() {
+  git for-each-ref --format='%(refname:short)' "refs/heads/$NAMESPACE/*"
+}
+
+count_manifests() {
+  local dir path count=0
+  dir=$(franken_dir)
+  if [ -d "$dir" ]; then
+    for path in "$dir"/*; do
+      if [ -f "$path" ]; then
+        count=$((count + 1))
+      fi
+    done
+  fi
+  printf '%s\n' "$count"
+}
+
+print_footprint() {
+  local branches
+  mapfile -t branches < <(franken_branches)
+
+  printf '\n'
+  printf 'This tool has put the following in this repo, and nothing outside it:\n'
+  printf '  manifests  %s (%s)\n' "$(franken_dir)" "$(count_manifests)"
+  printf '  branches   %s/* (%s)\n' "$NAMESPACE" "${#branches[@]}"
+  printf '  conflicts  %s (shared with your normal git; pruned by git gc)\n' \
+    "$(git rev-parse --git-path rr-cache)"
+  printf '\nRemove all of it with: %s purge\n' "$PROG"
+}
+
+cmd_show() {
+  local name=${1-}
+  validate_name "$name"
+  local path branch
+  path=$(require_manifest "$name")
+  branch=$(branch_name "$name")
+  parse_manifest "$path"
+
+  printf 'manifest: %s\n' "$path"
+  printf 'branch:   %s\n' "$branch"
+  printf 'trunk:    %s\n' "$MANIFEST_TRUNK"
+  printf '\n'
+
+  if ! ref_exists "refs/heads/$branch"; then
+    printf 'not built yet — run: %s build %s\n' "$PROG" "$name"
+    printf '\nbranches:\n'
+    local tip
+    for tip in "${MANIFEST_TIPS[@]}"; do printf '  %s\n' "$tip"; done
+    return 0
+  fi
+
+  local stale=0 tip status
+  printf 'branches:\n'
+  for tip in "${MANIFEST_TIPS[@]}"; do
+    if ! ref_exists "$tip"; then
+      status="MISSING"
+      stale=1
+    elif git merge-base --is-ancestor "$tip" "$branch" 2>/dev/null; then
+      status="merged"
+    else
+      status="STALE"
+      stale=1
+    fi
+    printf '  %-40s %s\n' "$tip" "$status"
+  done
+
+  printf '\n'
+  if [ "$stale" -eq 1 ]; then
+    printf 'out of date — rebuild with: %s build %s\n' "$PROG" "$name"
+  else
+    printf 'up to date\n'
+  fi
+}
+
+cmd_edit() {
+  local name=${1-}
+  validate_name "$name"
+  local path
+  path=$(require_manifest "$name")
+  "${EDITOR:-vi}" "$path"
+}
+
+cmd_add() {
+  local name=${1-}
+  validate_name "$name"
+  shift || true
+  [ "$#" -gt 0 ] || die "usage: $PROG add <name> <branch>..."
+
+  local path tip
+  path=$(require_manifest "$name")
+  parse_manifest "$path"
+
+  for tip in "$@"; do
+    ref_exists "$tip" || die "branch '$tip' does not exist"
+    case " ${MANIFEST_TIPS[*]-} " in
+    *" $tip "*) die "branch '$tip' is already in manifest '$name'" ;;
+    esac
+    printf '%s\n' "$tip" >>"$path"
+    info "Added $tip to '$name'"
+  done
+  info "Rebuild with: $PROG build $name"
+}
+
+cmd_rm() {
+  local name=${1-}
+  validate_name "$name"
+  shift || true
+  [ "$#" -gt 0 ] || die "usage: $PROG rm <name> <branch>..."
+
+  local path tip tmp
+  path=$(require_manifest "$name")
+
+  for tip in "$@"; do
+    grep -qxF "$tip" "$path" || die "branch '$tip' is not in manifest '$name'"
+    tmp=$(mktemp)
+    grep -vxF "$tip" "$path" >"$tmp"
+    mv "$tmp" "$path"
+    info "Removed $tip from '$name'"
+  done
+  info "Rebuild with: $PROG build $name"
+}
+
+cmd_build() {
+  local name=${1-}
+  validate_name "$name"
+  require_clean_worktree
+  ! merge_in_progress || die "a merge is in progress; finish it or run 'git merge --abort'"
+
+  local path branch elsewhere
+  path=$(require_manifest "$name")
+  branch=$(branch_name "$name")
+  parse_manifest "$path"
+  validate_manifest "$name"
+
+  if elsewhere=$(checked_out_elsewhere "$branch"); then
+    die "$branch is checked out at $elsewhere
+Integration branches are disposable: drop it there ($PROG drop $name) and
+rebuild here, or just build under a different name."
+  fi
+
+  info "Building $branch from $MANIFEST_TRUNK"
+  git checkout -q -B "$branch" "$MANIFEST_TRUNK"
+  merge_remaining "$name"
+}
+
+cmd_continue() {
+  local name=${1-}
+  validate_name "$name"
+
+  local path branch current
+  path=$(require_manifest "$name")
+  branch=$(branch_name "$name")
+  parse_manifest "$path"
+  validate_manifest "$name"
+
+  current=$(git rev-parse --abbrev-ref HEAD)
+  [ "$current" = "$branch" ] ||
+    die "on '$current', expected '$branch'; nothing to continue"
+
+  if merge_in_progress; then
+    if [ -n "$(unmerged_paths)" ]; then
+      info "Still unresolved:"
+      unmerged_paths | sed 's/^/  /' >&2
+      die "resolve and 'git add' these, then rerun"
+    fi
+    git "${RERERE[@]}" commit --no-edit --quiet
+    info "  committed resolved merge"
+  fi
+
+  merge_remaining "$name"
+}
+
+cmd_drop() {
+  local name=${1-}
+  validate_name "$name"
+  local branch elsewhere
+  branch=$(branch_name "$name")
+
+  ref_exists "refs/heads/$branch" || {
+    info "$branch does not exist"
+    return 0
+  }
+
+  if elsewhere=$(checked_out_elsewhere "$branch"); then
+    die "$branch is checked out at $elsewhere; drop it from there"
+  fi
+
+  if [ "$(git rev-parse --abbrev-ref HEAD)" = "$branch" ]; then
+    local trunk
+    trunk=$(detect_trunk)
+    git checkout -q "$trunk"
+    info "Moved off $branch to $trunk"
+  fi
+
+  git branch -q -D "$branch"
+  info "Deleted $branch (manifest kept; rebuild with: $PROG build $name)"
+}
+
+cmd_delete() {
+  local name=${1-}
+  validate_name "$name"
+  require_manifest "$name" >/dev/null
+  cmd_drop "$name"
+  rm -f "$(manifest_path "$name")"
+  info "Deleted manifest '$name'"
+}
+
+cmd_purge() {
+  local dry_run=0
+  case "${1-}" in
+  --dry-run) dry_run=1 ;;
+  "") ;;
+  *) die "usage: $PROG purge [--dry-run]" ;;
+  esac
+
+  local dir branches
+  dir=$(franken_dir)
+  mapfile -t branches < <(franken_branches)
+
+  if [ "${#branches[@]}" -eq 0 ] && [ ! -d "$dir" ]; then
+    info "nothing to purge; this tool has left nothing in this repo"
+    return 0
+  fi
+
+  local branch elsewhere blocked=()
+  for branch in ${branches[@]+"${branches[@]}"}; do
+    if elsewhere=$(checked_out_elsewhere "$branch"); then
+      blocked+=("$branch at $elsewhere")
+    fi
+  done
+
+  if [ "${#blocked[@]}" -gt 0 ]; then
+    info "Checked out in another worktree, so purge would leave a partial mess:"
+    printf '  %s\n' "${blocked[@]}" >&2
+    die "switch those worktrees off the branches first, then rerun"
+  fi
+
+  info "Would remove:"
+  for branch in ${branches[@]+"${branches[@]}"}; do
+    info "  branch    $branch"
+  done
+  [ -d "$dir" ] && info "  manifests $dir"
+  info ""
+  info "Keeping $(git rev-parse --git-path rr-cache): it is git's own cache, is"
+  info "shared with your normal rebases, and git gc prunes it on its own."
+
+  if [ "$dry_run" -eq 1 ]; then
+    info ""
+    info "(--dry-run: nothing was removed)"
+    return 0
+  fi
+
+  local current
+  current=$(git rev-parse --abbrev-ref HEAD)
+  case "$current" in
+  "$NAMESPACE"/*)
+    git checkout -q "$(detect_trunk)"
+    info ""
+    info "Moved off $current"
+    ;;
+  esac
+
+  for branch in ${branches[@]+"${branches[@]}"}; do
+    git branch -q -D "$branch"
+  done
+
+  # Guard a recursive delete built from command output.
+  case "$dir" in
+  */"$STORE") rm -rf "${dir:?}" ;;
+  *) die "refusing to remove '$dir': not a $STORE directory" ;;
+  esac
+
+  info ""
+  info "Purged. This repo is as though git-franken had never run."
+}
+
+cmd_push() {
+  local name=${1-}
+  validate_name "$name"
+  local branch remote=${2:-origin}
+  branch=$(branch_name "$name")
+  ref_exists "refs/heads/$branch" || die "$branch is not built (run: $PROG build $name)"
+
+  # Rebuilt history is never fast-forward, so a force push is expected here.
+  git push --force-with-lease "$remote" "$branch"
+  info "Pushed $branch to $remote"
+}
+
+usage() {
+  cat <<EOF
+$PROG — rebuild disposable integration branches from a manifest
+
+usage: $PROG <command> [args]
+
+  new <name> [branch...]    create a manifest
+  list                      list manifests
+  show <name>               show a manifest and whether it is up to date
+  edit <name>               open a manifest in \$EDITOR
+  add <name> <branch>...    add branches to a manifest
+  rm <name> <branch>...     remove branches from a manifest
+  build <name>              rebuild $NAMESPACE/<name> from scratch
+  continue <name>           resume a build after resolving a conflict
+  drop <name>               delete the branch, keep the manifest
+  delete <name>             delete the branch and the manifest
+  purge [--dry-run]         remove every $NAMESPACE/* branch and all manifests
+  push <name> [remote]      force-push the branch (default remote: origin)
+
+Manifests live in \$GIT_COMMON_DIR/$NAMESPACE, so they are shared across
+worktrees and never committed. The manifest is the durable artifact; the
+branch is disposable output that can be rebuilt anywhere.
+
+Conflict resolutions are cached with git rerere and replayed on every
+rebuild, without changing your git config.
+EOF
+}
+
+main() {
+  local cmd=${1-}
+  [ "$#" -gt 0 ] && shift || true
+
+  case "$cmd" in
+  new) require_repo && cmd_new "$@" ;;
+  list) require_repo && cmd_list "$@" ;;
+  show) require_repo && cmd_show "$@" ;;
+  edit) require_repo && cmd_edit "$@" ;;
+  add) require_repo && cmd_add "$@" ;;
+  rm) require_repo && cmd_rm "$@" ;;
+  build) require_repo && cmd_build "$@" ;;
+  continue) require_repo && cmd_continue "$@" ;;
+  drop) require_repo && cmd_drop "$@" ;;
+  delete) require_repo && cmd_delete "$@" ;;
+  purge) require_repo && cmd_purge "$@" ;;
+  push) require_repo && cmd_push "$@" ;;
+  -h | --help | help | "") usage ;;
+  *) die "unknown command '$cmd' (try: $PROG --help)" ;;
+  esac
+}
+
+main "$@"
