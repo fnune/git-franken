@@ -25,7 +25,9 @@ setup_repo() {
 
 teardown_repo() {
   cd / || true
-  [ -n "${TEST_ROOT:-}" ] && rm -rf "$TEST_ROOT"
+  if [ -n "${TEST_ROOT:-}" ]; then
+    rm -rf "$TEST_ROOT"
+  fi
 }
 
 commit_on() {

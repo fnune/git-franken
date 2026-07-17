@@ -137,7 +137,7 @@ unmerged_paths() {
 }
 
 checked_out_elsewhere() {
-  local branch=$1 here current path=""
+  local branch=$1 here path=""
   here=$(git rev-parse --show-toplevel)
 
   while IFS= read -r line; do
@@ -202,8 +202,13 @@ merge_remaining() {
     info "  merged $tip"
   done
 
+  local label="branches"
+  if [ "$merged" -eq 1 ]; then
+    label="branch"
+  fi
+
   info ""
-  info "Built $(branch_name "$name"): $merged merges on top of $MANIFEST_TRUNK"
+  info "Built $(branch_name "$name"): $merged $label on top of $MANIFEST_TRUNK"
 }
 
 cmd_new() {
