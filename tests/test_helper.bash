@@ -43,22 +43,32 @@ franken() {
   "$GIT_FRANKEN" "$@"
 }
 
-# manifest <name> [branch...] — write a manifest the way a user would, by
-# putting a file there. Pass an explicit "trunk: x" line as a branch to override.
 manifest() {
-  local name=$1 dir
+  local name=$1
+  shift
+  manifest_raw "$name" "trunk: main" "$@"
+}
+
+# Writes a manifest verbatim, for tests that need no trunk: line at all.
+manifest_raw() {
+  local name=$1 dir line
   shift
   dir="$(git rev-parse --git-common-dir)/git-franken"
   mkdir -p "$dir"
-  printf 'trunk: main\n' >"$dir/$name"
-  local line
+  : >"$dir/$name"
   for line in "$@"; do
     printf '%s\n' "$line" >>"$dir/$name"
   done
 }
 
-# Writes $TEST_ROOT/ed: an editor that records whether it was invoked, and with
-# what arguments, into the file it is handed.
+# Gives $REPO an origin whose HEAD points at main, as a real clone would have.
+make_origin() {
+  git init -q --bare "$TEST_ROOT/remote.git"
+  git remote add origin "$TEST_ROOT/remote.git"
+  git push -q origin --all
+  git remote set-head origin main
+}
+
 fake_editor() {
   cat >"$TEST_ROOT/ed" <<'EOF'
 #!/bin/sh

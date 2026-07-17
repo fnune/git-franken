@@ -5,9 +5,8 @@ set -euo pipefail
 readonly PROG="git franken"
 readonly NAMESPACE="franken"
 
-# Must differ from NAMESPACE: git resolves a ref by trying $GIT_DIR/<refname>
-# before $GIT_DIR/refs/heads/<refname>, so a manifest at $GIT_DIR/franken/x
-# would shadow the branch franken/x and make git call it a broken ref.
+# Must differ from NAMESPACE: git tries $GIT_DIR/<refname> before
+# $GIT_DIR/refs/heads/<refname>, so $GIT_DIR/franken/x would shadow branch franken/x.
 readonly STORE="git-franken"
 
 # rerere is forced per-invocation rather than read from user config, so builds
@@ -62,10 +61,13 @@ ref_exists() {
   git rev-parse --verify --quiet "$1" >/dev/null 2>&1
 }
 
+# Returns origin/HEAD verbatim rather than its local namesake: a local trunk can
+# sit behind the remote, and building on it yields a tip that looks current but
+# is not. A manifest naming a trunk explicitly always wins over this.
 detect_trunk() {
   local head
   if head=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null); then
-    printf '%s\n' "${head#origin/}"
+    printf '%s\n' "$head"
     return
   fi
   for candidate in main master trunk; do
@@ -77,6 +79,20 @@ detect_trunk() {
   die "cannot detect trunk; add a 'trunk: <branch>' line to the manifest"
 }
 
+# drop and purge need somewhere to put HEAD, and a trunk like origin/main is not
+# checkout-able without detaching.
+landing_branch() {
+  local trunk candidate
+  trunk=$(detect_trunk 2>/dev/null) || trunk=""
+  for candidate in "${trunk#origin/}" main master trunk; do
+    if [ -n "$candidate" ] && ref_exists "refs/heads/$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 MANIFEST_TRUNK=""
 MANIFEST_TIPS=()
 
@@ -86,8 +102,10 @@ parse_manifest() {
   MANIFEST_TIPS=()
 
   while IFS= read -r line || [ -n "$line" ]; do
-    line=${line%%#*}
     line=${line#"${line%%[![:space:]]*}"}
+    # Only whole-line comments: git permits '#' inside a ref name, and treating
+    # it as an inline comment would silently truncate a branch like feat#123.
+    case "$line" in '#'*) continue ;; esac
     line=${line%"${line##*[![:space:]]}"}
     [ -n "$line" ] || continue
 
@@ -154,16 +172,18 @@ checked_out_elsewhere() {
   return 1
 }
 
-# git merge exits non-zero and says "Automatic merge failed" even when rerere
-# has resolved and staged every path, so only the unmerged-path count can tell
-# a replayed resolution from a conflict that needs a human.
+# git merge exits non-zero even when rerere has resolved and staged every path,
+# so only the unmerged-path count distinguishes a replay from a real conflict.
 merge_tip() {
-  local tip=$1 rc=0
+  local tip=$1 rc=0 err
 
-  git "${RERERE[@]}" merge --no-ff -m "franken: merge $tip" "$tip" >/dev/null 2>&1 || rc=$?
+  err=$(git "${RERERE[@]}" merge --no-ff -m "franken: merge $tip" "$tip" 2>&1 >/dev/null) || rc=$?
   [ "$rc" -eq 0 ] && return 0
 
-  merge_in_progress || die "merging '$tip' failed before a merge could start"
+  if ! merge_in_progress; then
+    [ -z "$err" ] || info "$err"
+    die "merging '$tip' failed before a merge could start"
+  fi
 
   if [ -n "$(unmerged_paths)" ]; then
     return 1
@@ -318,7 +338,10 @@ cmd_edit() {
     case "$1" in
     --path) print_path=1 ;;
     -*) die "usage: $PROG edit [--path] <name>" ;;
-    *) name=$1 ;;
+    *)
+      [ -z "$name" ] || die "one manifest at a time: got '$name' and '$1'"
+      name=$1
+      ;;
     esac
     shift
   done
@@ -341,8 +364,7 @@ cmd_edit() {
     return 0
   fi
 
-  # EDITOR routinely carries arguments ("code -w", "emacsclient -t"), so it has
-  # to word-split; quoting it would look for a command with a space in its name.
+  # EDITOR routinely carries arguments ("code -w"), so it has to word-split.
   # shellcheck disable=SC2086
   ${EDITOR:-vi} "$path"
 }
@@ -350,8 +372,13 @@ cmd_edit() {
 cmd_build() {
   local name=${1-}
   validate_name "$name"
+
+  # Before require_clean_worktree: a conflicted merge is also a dirty worktree,
+  # and "commit or stash" is ruinous advice mid-merge.
+  if merge_in_progress; then
+    die "a merge is in progress; finish it with '$PROG continue $name' or abandon it with 'git merge --abort'"
+  fi
   require_clean_worktree
-  ! merge_in_progress || die "a merge is in progress; finish it or run 'git merge --abort'"
 
   local path branch elsewhere
   path=$(require_manifest "$name")
@@ -413,10 +440,11 @@ cmd_drop() {
   fi
 
   if [ "$(git rev-parse --abbrev-ref HEAD)" = "$branch" ]; then
-    local trunk
-    trunk=$(detect_trunk)
-    git checkout -q "$trunk"
-    info "Moved off $branch to $trunk"
+    local landing
+    landing=$(landing_branch) ||
+      die "no local branch to move onto; check out one, then rerun"
+    git checkout -q "$landing"
+    info "Moved off $branch to $landing"
   fi
 
   git branch -q -D "$branch"
@@ -468,13 +496,15 @@ cmd_purge() {
     return 0
   fi
 
-  local current
+  local current landing
   current=$(git rev-parse --abbrev-ref HEAD)
   case "$current" in
   "$NAMESPACE"/*)
-    git checkout -q "$(detect_trunk)"
+    landing=$(landing_branch) ||
+      die "no local branch to move onto; check out one, then rerun"
+    git checkout -q "$landing"
     info ""
-    info "Moved off $current"
+    info "Moved off $current to $landing"
     ;;
   esac
 
@@ -482,7 +512,6 @@ cmd_purge() {
     git branch -q -D "$branch"
   done
 
-  # Guard a recursive delete built from command output.
   case "$dir" in
   */"$STORE") rm -rf "${dir:?}" ;;
   *) die "refusing to remove '$dir': not a $STORE directory" ;;

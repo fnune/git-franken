@@ -58,10 +58,14 @@ Then write the manifest at `git franken edit --path staging`, one branch per
 line, and build:
 
 ```
-trunk: main
+trunk: origin/main
 feat/auth
 feat/billing
 ```
+
+`trunk:` is optional and defaults to `origin/HEAD`. Leave it out unless the user
+wants a specific base. `build` merges onto whatever was last fetched and does
+not fetch, so `git fetch` first if currency matters.
 
 ```sh
 git franken build staging

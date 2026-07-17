@@ -1,10 +1,8 @@
 {
   description = "Rebuild disposable integration branches from a manifest";
 
-  # nixpkgs is deliberately the only input. Dev tooling (formatters, linters)
-  # comes from nixpkgs directly rather than from flake wrappers, because a flake
-  # input is inherited by every consumer: extra inputs here would force everyone
-  # installing this package to either fetch our dev tooling or `follows` it away.
+  # Every input here is inherited by consumers, who must then fetch it or
+  # `follows` it away, so dev tooling comes from nixpkgs rather than its flakes.
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
 
   outputs = {

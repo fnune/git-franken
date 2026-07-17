@@ -49,7 +49,6 @@ teardown() {
 	grep -qx "opened" "$REPO/.git/git-franken/demo"
 }
 
-# EDITOR is routinely set to a command with arguments, so it must word-split.
 @test "edit honours an EDITOR that carries arguments" {
 	fake_editor
 	EDITOR="$TEST_ROOT/ed --flag" run franken edit demo
@@ -74,6 +73,13 @@ teardown() {
 	run franken edit
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"missing manifest name"* ]]
+}
+
+@test "edit rejects a second name rather than silently taking one" {
+	run franken edit --path one two
+	[ "$status" -ne 0 ]
+	[ ! -e "$REPO/.git/git-franken/two" ]
+	[ ! -e "$REPO/.git/git-franken/one" ]
 }
 
 # --- manifest parsing ------------------------------------------------------
@@ -106,6 +112,19 @@ teardown() {
 	assert_merged other franken/demo
 }
 
+# git permits '#' in ref names, so treating it as an inline comment truncates a
+# real branch name and blames the wrong branch.
+@test "a branch name containing a hash is not truncated" {
+	git checkout -q -b 'feat#123' main
+	echo x >h.txt && git add h.txt && git commit -qm 'feat#123'
+	git checkout -q main
+
+	manifest demo 'feat#123'
+	run franken build demo
+	[ "$status" -eq 0 ]
+	assert_merged 'feat#123' franken/demo
+}
+
 @test "trunk defaults to main when the manifest omits it" {
 	commit_on feat-a a.txt alpha
 	mkdir -p "$REPO/.git/git-franken"
@@ -136,9 +155,8 @@ teardown() {
 	git rev-parse --verify --quiet refs/heads/franken/demo
 }
 
-# git tries $GIT_DIR/<refname> before $GIT_DIR/refs/heads/<refname>, so storing
-# manifests under $GIT_DIR/franken/ made every lookup of franken/<name> read the
-# manifest and warn about a broken ref.
+# git tries $GIT_DIR/<refname> first, so a manifest at $GIT_DIR/franken/<name>
+# makes every lookup of branch franken/<name> read it and warn about a broken ref.
 @test "a manifest does not shadow the branch of the same name" {
 	commit_on feat-a a.txt alpha
 	manifest demo feat-a
@@ -230,6 +248,78 @@ teardown() {
 	[[ "$output" == *"1 branch on top of main"* ]]
 }
 
+# --- trunk detection -------------------------------------------------------
+
+@test "an unfetchable local trunk is not preferred over the remote one" {
+	commit_on feat-a a.txt alpha
+	make_origin
+	manifest_raw demo feat-a
+
+	git checkout -q feat-a
+	git branch -D main
+
+	run franken build demo
+	[ "$status" -eq 0 ]
+	assert_merged origin/main franken/demo
+}
+
+# Building on a stale local trunk produces a branch that looks fine and is not.
+@test "build uses the remote trunk rather than a stale local branch" {
+	commit_on feat-a a.txt alpha
+	make_origin
+
+	# origin/main moves ahead of the local main
+	git push -q origin "main:refs/heads/scratch"
+	git checkout -q --detach origin/main
+	echo newer >newer.txt && git add newer.txt && git commit -qm "trunk moved on"
+	git push -q origin "HEAD:refs/heads/main"
+	git fetch -q origin
+	git checkout -q main
+
+	manifest_raw demo feat-a
+	run franken build demo
+	[ "$status" -eq 0 ]
+	assert_merged origin/main franken/demo
+}
+
+@test "an explicit trunk is honoured verbatim, without remote-preference magic" {
+	commit_on feat-a a.txt alpha
+	make_origin
+
+	git checkout -q --detach origin/main
+	echo newer >newer.txt && git add newer.txt && git commit -qm "trunk moved on"
+	git push -q origin "HEAD:refs/heads/main"
+	git fetch -q origin
+	git checkout -q main
+
+	manifest demo feat-a
+	run franken build demo
+	[ "$status" -eq 0 ]
+	refute_merged origin/main franken/demo
+}
+
+@test "drop lands on a local branch rather than a detached HEAD" {
+	commit_on feat-a a.txt alpha
+	make_origin
+	manifest_raw demo feat-a
+	franken build demo
+
+	run franken drop demo
+	[ "$status" -eq 0 ]
+	git symbolic-ref -q HEAD
+}
+
+@test "purge lands on a local branch rather than a detached HEAD" {
+	commit_on feat-a a.txt alpha
+	make_origin
+	manifest_raw demo feat-a
+	franken build demo
+
+	run franken purge
+	[ "$status" -eq 0 ]
+	git symbolic-ref -q HEAD
+}
+
 # --- conflicts and rerere --------------------------------------------------
 
 @test "build stops on a genuine conflict and names the file" {
@@ -262,6 +352,22 @@ teardown() {
 	assert_merged feat-b franken/demo
 	assert_merged feat-c franken/demo
 	[ "$(cat shared.txt)" = "resolved" ]
+}
+
+# "commit or stash" is destructive advice mid-merge: stash refuses outright, and
+# committing fabricates a merge commit with conflict markers still in it.
+@test "a build interrupted by a conflict does not advise committing or stashing" {
+	commit_on feat-a shared.txt alpha
+	commit_on feat-b shared.txt bravo
+	manifest demo feat-a feat-b
+	run franken build demo
+	[ "$status" -ne 0 ]
+
+	run franken build demo
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"merge is in progress"* ]]
+	[[ "$output" != *"stash"* ]]
+	[[ "$output" != *"commit or"* ]]
 }
 
 @test "continue refuses while paths are still unresolved" {
@@ -504,7 +610,6 @@ teardown() {
 	[[ "$output" == *"unknown command"* ]]
 }
 
-# The manifest is declarative, so mutating it through the CLI is gone for good.
 @test "the removed manifest-mutating commands stay gone" {
 	local cmd
 	for cmd in new add rm delete; do

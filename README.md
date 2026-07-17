@@ -15,7 +15,6 @@ git franken push staging    # force-push for CI
 `edit` opens a text file. You write the branches you want:
 
 ```
-trunk: main
 feat/auth
 feat/billing
 colleague/hotfix
@@ -93,8 +92,18 @@ whether a rebuild is needed.
 ## Manifests
 
 Plain text, one branch per line, in `$GIT_COMMON_DIR/git-franken/`. Shared
-across every worktree, never committed. `trunk:` is optional and defaults to
-`origin/HEAD`, then `main`/`master`/`trunk`.
+across every worktree, never committed. Lines starting with `#` are comments;
+`#` elsewhere is part of a branch name, since git allows it.
+
+`trunk:` is optional. It defaults to whatever `origin/HEAD` names — normally
+`origin/main`, **not** your local `main`, because a local trunk can sit behind
+the remote and building on it yields a tip that looks current and is not. Write
+`trunk: main` if you deliberately want the local branch; an explicit trunk is
+always used verbatim. With no remote, it falls back to local
+`main`/`master`/`trunk`.
+
+That means `build` merges onto whatever you last fetched. It does not fetch for
+you.
 
 The store is `git-franken/` rather than `franken/` on purpose: git resolves a ref
 by trying `$GIT_DIR/<refname>` before `$GIT_DIR/refs/heads/<refname>`, so a
@@ -176,7 +185,7 @@ ln -s "$PWD/skills/building-frankenbranches" ~/.claude/skills/
 
 ```sh
 nix develop          # bats, shellcheck, shfmt, formatters
-bats tests/          # 53 tests
+bats tests/          # 61 tests
 nix fmt              # format
 nix flake check      # tests + lint, against the built package
 ```
