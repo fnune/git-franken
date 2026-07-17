@@ -1,0 +1,17 @@
+{
+  "name": "git-franken",
+  "version": "0.1.0",
+  "description": "Build frankenbranches: disposable integration branches rebuilt from a manifest",
+  "author": { "name": "Fausto Núñez Alberro" },
+  "homepage": "https://github.com/fnune/git-franken",
+  "repository": "https://github.com/fnune/git-franken",
+  "keywords": [
+    "git",
+    "branch",
+    "integration-branch",
+    "frankenbranch",
+    "merge",
+    "rerere",
+    "worktree"
+  ]
+}

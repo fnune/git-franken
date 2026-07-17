@@ -1,0 +1,12 @@
+{
+  "name": "fnune-git-franken",
+  "description": "git-franken: rebuild disposable integration branches from a manifest",
+  "owner": { "name": "Fausto Núñez Alberro" },
+  "plugins": [
+    {
+      "name": "git-franken",
+      "source": "./",
+      "description": "Build frankenbranches: disposable integration branches rebuilt from a manifest"
+    }
+  ]
+}
