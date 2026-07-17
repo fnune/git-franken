@@ -149,7 +149,13 @@ page. The only runtime dependency is `git`.
 
 `skills/building-frankenbranches/` is an [Agent
 Skill](https://code.claude.com/docs/en/skills), so "build a frankenbranch" is
-enough to invoke it:
+enough to invoke it. Install it without cloning:
+
+```sh
+mkdir -p ~/.claude/skills/building-frankenbranches && curl -fsSL https://raw.githubusercontent.com/fnune/git-franken/main/skills/building-frankenbranches/SKILL.md -o ~/.claude/skills/building-frankenbranches/SKILL.md
+```
+
+Or symlink it from a clone, to track your edits:
 
 ```sh
 ln -s "$PWD/skills/building-frankenbranches" ~/.claude/skills/
