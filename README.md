@@ -7,9 +7,18 @@ to point a test environment at. Building it by hand is fine once. It stops being
 fine when a branch moves and you re-resolve yesterday's conflicts.
 
 ```sh
-git franken new staging feat/auth feat/billing   # declare what goes in
-git franken build staging                        # -> branch franken/staging
-git franken push staging                         # force-push for CI
+git franken edit staging    # declare what goes in
+git franken build staging   # -> branch franken/staging
+git franken push staging    # force-push for CI
+```
+
+`edit` opens a text file. You write the branches you want:
+
+```
+trunk: main
+feat/auth
+feat/billing
+colleague/hotfix
 ```
 
 When a branch moves, run `git franken build staging` again. That is the whole
@@ -27,86 +36,65 @@ rebuild.
 Because the branch holds nothing the manifest can't regenerate, you never move
 one between worktrees or worry about losing one. Delete it, rebuild it.
 
+You do two things: say which branches go in, and resolve conflicts the first
+time. Everything else is `build`.
+
 ```mermaid
 sequenceDiagram
-    autonumber
     actor You
+    participant M as manifest
     participant F as git franken
-    participant G as git
-    participant R as rerere cache
+    participant R as rerere
 
-    You->>F: new staging feat/auth feat/billing
-    F->>F: write manifest
-
-    Note over You,R: first build meets a new conflict
+    You->>M: list the branches
     You->>F: build staging
-    F->>G: checkout -B franken/staging main
-    F->>G: merge feat/auth
-    G-->>F: clean
-    F->>G: merge feat/billing
-    G->>R: seen this conflict?
-    R-->>G: no
-    G-->>F: CONFLICT src/invoice.ts
-    F-->>You: resolve, git add, then: franken continue staging
+    F->>M: read
+    F-->>You: CONFLICT invoice.ts
+    You->>F: resolve, then continue staging
+    F->>R: remember this resolution
+    F-->>You: franken/staging is ready
 
-    Note over You,R: resolve once
-    You->>G: edit, git add
-    You->>F: continue staging
-    F->>G: commit merge
-    G->>R: record resolution
-    F-->>You: Built franken/staging
-
-    Note over You,R: feat/auth moves, so rebuild
+    Note over You,R: a branch moves, so rebuild
     You->>F: build staging
-    F->>G: checkout -B franken/staging main
-    Note right of G: old tip discarded
-    F->>G: merge feat/auth, feat/billing
-    G->>R: seen this conflict?
-    R-->>G: yes, replay it
-    G-->>F: staged, but exit code still non-zero
-    Note right of F: franken checks unmerged paths,<br/>not the exit code
-    F->>G: commit
-    F-->>You: Built franken/staging, no conflict
-
-    You->>F: push staging
-    F->>G: push --force-with-lease
+    F->>M: read
+    R-->>F: replay past resolutions
+    F-->>You: franken/staging is ready, no conflict
 ```
 
-The rebuild step is the point of the whole tool: the conflict does not come back.
+The second build is the point of the whole tool: the conflict does not come
+back.
 
 ## Commands
 
-| Command                  | Does                                              |
-| ------------------------ | ------------------------------------------------- |
-| `new <name> [branch...]` | create a manifest                                 |
-| `list`                   | list manifests and show the tool's footprint      |
-| `show <name>`            | show a manifest and whether it is up to date      |
-| `edit <name>`            | open a manifest in `$EDITOR`                      |
-| `add <name> <branch>...` | add branches to a manifest                        |
-| `rm <name> <branch>...`  | remove branches from a manifest                   |
-| `build <name>`           | rebuild `franken/<name>` from scratch             |
-| `continue <name>`        | resume a build after resolving a conflict         |
-| `drop <name>`            | delete the branch, keep the manifest              |
-| `delete <name>`          | delete the branch and the manifest                |
-| `purge [--dry-run]`      | remove every `franken/*` branch and all manifests |
-| `push <name> [remote]`   | force-push the branch (default remote `origin`)   |
+| Command                | Does                                              |
+| ---------------------- | ------------------------------------------------- |
+| `edit [--path] <name>` | open the manifest in `$EDITOR`, or print its path |
+| `build <name>`         | rebuild `franken/<name>` from scratch             |
+| `continue <name>`      | resume a build after resolving a conflict         |
+| `show <name>`          | show a manifest and whether it is up to date      |
+| `list`                 | list manifests and this tool's footprint          |
+| `drop <name>`          | delete the branch, keep the manifest              |
+| `purge [--dry-run]`    | remove every `franken/*` branch and all manifests |
+| `push <name> [remote]` | force-push the branch (default remote `origin`)   |
 
-`git franken show <name>` reports `STALE` when a tip has moved, so you know
+There is deliberately no `add` or `remove`. The manifest is declarative: it is a
+text file listing the state you want, and `build` reconciles to it. Adding a
+branch means adding a line. `edit --path` prints the path so you can get at it
+however you like:
+
+```sh
+echo feat/search >> "$(git franken edit --path staging)"
+cat "$(git franken edit --path staging)"
+```
+
+`git franken show <name>` reports `STALE` when a branch has moved, so you know
 whether a rebuild is needed.
 
 ## Manifests
 
-Plain text, one branch per line, in `$GIT_COMMON_DIR/git-franken/`:
-
-```
-trunk: main
-feat/auth
-feat/billing
-colleague/hotfix
-```
-
-Shared across every worktree, never committed. `trunk:` is optional and defaults
-to `origin/HEAD`, then `main`/`master`/`trunk`.
+Plain text, one branch per line, in `$GIT_COMMON_DIR/git-franken/`. Shared
+across every worktree, never committed. `trunk:` is optional and defaults to
+`origin/HEAD`, then `main`/`master`/`trunk`.
 
 The store is `git-franken/` rather than `franken/` on purpose: git resolves a ref
 by trying `$GIT_DIR/<refname>` before `$GIT_DIR/refs/heads/<refname>`, so a

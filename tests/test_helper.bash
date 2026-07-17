@@ -43,6 +43,32 @@ franken() {
   "$GIT_FRANKEN" "$@"
 }
 
+# manifest <name> [branch...] — write a manifest the way a user would, by
+# putting a file there. Pass an explicit "trunk: x" line as a branch to override.
+manifest() {
+  local name=$1 dir
+  shift
+  dir="$(git rev-parse --git-common-dir)/git-franken"
+  mkdir -p "$dir"
+  printf 'trunk: main\n' >"$dir/$name"
+  local line
+  for line in "$@"; do
+    printf '%s\n' "$line" >>"$dir/$name"
+  done
+}
+
+# Writes $TEST_ROOT/ed: an editor that records whether it was invoked, and with
+# what arguments, into the file it is handed.
+fake_editor() {
+  cat >"$TEST_ROOT/ed" <<'EOF'
+#!/bin/sh
+file=$1
+[ "$#" -eq 2 ] && { file=$2; echo "got $1" >>"$file"; }
+echo opened >>"$file"
+EOF
+  chmod +x "$TEST_ROOT/ed"
+}
+
 assert_merged() {
   git merge-base --is-ancestor "$1" "$2"
 }

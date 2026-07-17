@@ -54,7 +54,7 @@ branch_name() {
 require_manifest() {
   local path
   path=$(manifest_path "$1")
-  [ -f "$path" ] || die "no manifest '$1' (try: $PROG list)"
+  [ -f "$path" ] || die "no manifest '$1' (create one: $PROG edit $1)"
   printf '%s\n' "$path"
 }
 
@@ -211,33 +211,11 @@ merge_remaining() {
   info "Built $(branch_name "$name"): $merged $label on top of $MANIFEST_TRUNK"
 }
 
-cmd_new() {
-  local name=${1-}
-  validate_name "$name"
-  shift || true
-
-  local path
-  path=$(manifest_path "$name")
-  [ ! -f "$path" ] || die "manifest '$name' already exists"
-
-  mkdir -p "$(franken_dir)"
-  {
-    printf '# Integration branch: %s\n' "$(branch_name "$name")"
-    printf '# One branch per line. Rebuild with: %s build %s\n' "$PROG" "$name"
-    printf 'trunk: %s\n' "$(detect_trunk)"
-    local tip
-    for tip in "$@"; do printf '%s\n' "$tip"; done
-  } >"$path"
-
-  info "Created $path"
-  [ "$#" -gt 0 ] || info "Add branches with: $PROG add $name <branch>..."
-}
-
 cmd_list() {
   local dir
   dir=$(franken_dir)
   [ -d "$dir" ] || {
-    info "no manifests yet (create one: $PROG new <name>)"
+    info "no manifests yet (create one: $PROG edit <name>)"
     return 0
   }
 
@@ -253,7 +231,7 @@ cmd_list() {
     fi
   done
   [ "$found" -eq 1 ] || {
-    info "no manifests yet (create one: $PROG new <name>)"
+    info "no manifests yet (create one: $PROG edit <name>)"
     return 0
   }
 
@@ -335,51 +313,38 @@ cmd_show() {
 }
 
 cmd_edit() {
-  local name=${1-}
+  local print_path=0 name=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+    --path) print_path=1 ;;
+    -*) die "usage: $PROG edit [--path] <name>" ;;
+    *) name=$1 ;;
+    esac
+    shift
+  done
+
   validate_name "$name"
   local path
-  path=$(require_manifest "$name")
-  "${EDITOR:-vi}" "$path"
-}
+  path=$(manifest_path "$name")
 
-cmd_add() {
-  local name=${1-}
-  validate_name "$name"
-  shift || true
-  [ "$#" -gt 0 ] || die "usage: $PROG add <name> <branch>..."
+  if [ ! -f "$path" ]; then
+    mkdir -p "$(franken_dir)"
+    {
+      printf '# Branches to merge into %s, one per line.\n' "$(branch_name "$name")"
+      printf '# Rebuild with: %s build %s\n' "$PROG" "$name"
+      printf 'trunk: %s\n' "$(detect_trunk)"
+    } >"$path"
+  fi
 
-  local path tip
-  path=$(require_manifest "$name")
-  parse_manifest "$path"
+  if [ "$print_path" -eq 1 ]; then
+    printf '%s\n' "$path"
+    return 0
+  fi
 
-  for tip in "$@"; do
-    ref_exists "$tip" || die "branch '$tip' does not exist"
-    case " ${MANIFEST_TIPS[*]-} " in
-    *" $tip "*) die "branch '$tip' is already in manifest '$name'" ;;
-    esac
-    printf '%s\n' "$tip" >>"$path"
-    info "Added $tip to '$name'"
-  done
-  info "Rebuild with: $PROG build $name"
-}
-
-cmd_rm() {
-  local name=${1-}
-  validate_name "$name"
-  shift || true
-  [ "$#" -gt 0 ] || die "usage: $PROG rm <name> <branch>..."
-
-  local path tip tmp
-  path=$(require_manifest "$name")
-
-  for tip in "$@"; do
-    grep -qxF "$tip" "$path" || die "branch '$tip' is not in manifest '$name'"
-    tmp=$(mktemp)
-    grep -vxF "$tip" "$path" >"$tmp"
-    mv "$tmp" "$path"
-    info "Removed $tip from '$name'"
-  done
-  info "Rebuild with: $PROG build $name"
+  # EDITOR routinely carries arguments ("code -w", "emacsclient -t"), so it has
+  # to word-split; quoting it would look for a command with a space in its name.
+  # shellcheck disable=SC2086
+  ${EDITOR:-vi} "$path"
 }
 
 cmd_build() {
@@ -456,15 +421,6 @@ cmd_drop() {
 
   git branch -q -D "$branch"
   info "Deleted $branch (manifest kept; rebuild with: $PROG build $name)"
-}
-
-cmd_delete() {
-  local name=${1-}
-  validate_name "$name"
-  require_manifest "$name" >/dev/null
-  cmd_drop "$name"
-  rm -f "$(manifest_path "$name")"
-  info "Deleted manifest '$name'"
 }
 
 cmd_purge() {
@@ -554,20 +510,22 @@ $PROG — rebuild disposable integration branches from a manifest
 
 usage: $PROG <command> [args]
 
-  new <name> [branch...]    create a manifest
-  list                      list manifests
-  show <name>               show a manifest and whether it is up to date
-  edit <name>               open a manifest in \$EDITOR
-  add <name> <branch>...    add branches to a manifest
-  rm <name> <branch>...     remove branches from a manifest
-  build <name>              rebuild $NAMESPACE/<name> from scratch
-  continue <name>           resume a build after resolving a conflict
-  drop <name>               delete the branch, keep the manifest
-  delete <name>             delete the branch and the manifest
-  purge [--dry-run]         remove every $NAMESPACE/* branch and all manifests
-  push <name> [remote]      force-push the branch (default remote: origin)
+  edit [--path] <name>   open the manifest in \$EDITOR, or print its path
+  build <name>           rebuild $NAMESPACE/<name> from scratch
+  continue <name>        resume a build after resolving a conflict
+  show <name>            show a manifest and whether it is up to date
+  list                   list manifests and this tool's footprint
+  drop <name>            delete the branch, keep the manifest
+  purge [--dry-run]      remove every $NAMESPACE/* branch and all manifests
+  push <name> [remote]   force-push the branch (default remote: origin)
 
-Manifests live in \$GIT_COMMON_DIR/$NAMESPACE, so they are shared across
+You declare what goes in by editing the manifest; 'build' reconciles. The
+manifest is a plain text file, so there is nothing to add or remove through
+this tool:
+
+  \$EDITOR "\$($PROG edit --path staging)"
+
+Manifests live in \$GIT_COMMON_DIR/$STORE, so they are shared across
 worktrees and never committed. The manifest is the durable artifact; the
 branch is disposable output that can be rebuilt anywhere.
 
@@ -581,16 +539,12 @@ main() {
   [ "$#" -gt 0 ] && shift || true
 
   case "$cmd" in
-  new) require_repo && cmd_new "$@" ;;
-  list) require_repo && cmd_list "$@" ;;
-  show) require_repo && cmd_show "$@" ;;
   edit) require_repo && cmd_edit "$@" ;;
-  add) require_repo && cmd_add "$@" ;;
-  rm) require_repo && cmd_rm "$@" ;;
   build) require_repo && cmd_build "$@" ;;
   continue) require_repo && cmd_continue "$@" ;;
+  show) require_repo && cmd_show "$@" ;;
+  list) require_repo && cmd_list "$@" ;;
   drop) require_repo && cmd_drop "$@" ;;
-  delete) require_repo && cmd_delete "$@" ;;
   purge) require_repo && cmd_purge "$@" ;;
   push) require_repo && cmd_push "$@" ;;
   -h | --help | help | "") usage ;;

@@ -22,18 +22,25 @@ previously resolved conflicts automatically, so rebuilds are usually silent.
 ## Commands
 
 ```sh
-git franken new <name> [branch...]   # create a manifest
-git franken list                     # manifests, and whether each is built
-git franken show <name>              # contents + whether it is stale
-git franken add <name> <branch>...   # add branches
-git franken rm <name> <branch>...    # remove branches
+git franken edit --path <name>       # print the manifest path (creates if new)
 git franken build <name>             # rebuild franken/<name> from scratch
 git franken continue <name>          # resume after resolving a conflict
+git franken show <name>              # contents + whether it is stale
+git franken list                     # manifests, and whether each is built
 git franken drop <name>              # delete branch, keep manifest
-git franken delete <name>            # delete both
 git franken purge [--dry-run]        # remove every franken/* branch + manifests
 git franken push <name> [remote]     # force-push the tip for CI
 ```
+
+There is no `add`/`remove`/`delete`. The manifest is a declarative text file, so
+edit it directly. Use `edit --path` to locate it, then Read/Write it:
+
+```sh
+git franken edit --path staging      # -> /repo/.git/git-franken/staging
+```
+
+Do not run `git franken edit <name>` without `--path` when working
+autonomously: it opens `$EDITOR` and will hang.
 
 Manifests live in `$(git rev-parse --git-common-dir)/git-franken/<name>` and are
 shared across worktrees. Never committed.
@@ -47,8 +54,16 @@ Identify the branches the user wants combined. If they describe them vaguely
 `git branch --list` or `gh pr view <n> --json headRefName` first, and confirm
 the list before writing it.
 
+Then write the manifest at `git franken edit --path staging`, one branch per
+line, and build:
+
+```
+trunk: main
+feat/auth
+feat/billing
+```
+
 ```sh
-git franken new staging feat/auth feat/billing
 git franken build staging
 ```
 
@@ -61,8 +76,8 @@ git franken build staging
 ```
 
 Use `git franken show <name>` first to check whether a rebuild is even needed.
-`STALE` means a tip moved; `MISSING` means a branch was deleted, so fix the
-manifest with `git franken rm`.
+`STALE` means a branch moved; `MISSING` means a branch was deleted, so remove
+that line from the manifest.
 
 ### Resolving a conflict
 
