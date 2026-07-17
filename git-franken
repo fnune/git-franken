@@ -302,7 +302,7 @@ cmd_show() {
   printf '\n'
 
   if ! ref_exists "refs/heads/$branch"; then
-    printf 'not built yet — run: %s build %s\n' "$PROG" "$name"
+    printf 'not built yet; run: %s build %s\n' "$PROG" "$name"
     printf '\nbranches:\n'
     local tip
     for tip in "${MANIFEST_TIPS[@]}"; do printf '  %s\n' "$tip"; done
@@ -326,7 +326,7 @@ cmd_show() {
 
   printf '\n'
   if [ "$stale" -eq 1 ]; then
-    printf 'out of date — rebuild with: %s build %s\n' "$PROG" "$name"
+    printf 'out of date; rebuild with: %s build %s\n' "$PROG" "$name"
   else
     printf 'up to date\n'
   fi
@@ -535,7 +535,7 @@ cmd_push() {
 
 usage() {
   cat <<EOF
-$PROG — rebuild disposable integration branches from a manifest
+$PROG: rebuild disposable integration branches from a manifest
 
 usage: $PROG <command> [args]
 

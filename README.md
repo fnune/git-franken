@@ -1,5 +1,15 @@
 # git-franken
 
+> **Use [Jujutsu](https://github.com/jj-vcs/jj) instead if you can.** Its
+> megamerges solve this properly. `jj new branch-a branch-b branch-c` builds the
+> combined commit, and amending any of those branches rebases it automatically,
+> so the rebuild step this whole tool exists to make cheap simply does not
+> exist. A conflict is stored inside the commit instead of stopping you, and
+> once you resolve it, it stays resolved as the branches change, with no rerere
+> cache guessing whether two conflicts are the same one. git-franken is a
+> workaround for plain git having neither of those things, and jj can live
+> alongside git in an existing repo, so the switch is cheaper than it sounds.
+
 Rebuild disposable integration branches ("frankenbranches") from a manifest.
 
 You have several branches in flight and want **one ref** containing all of them,
@@ -95,7 +105,7 @@ Plain text, one branch per line, in `$GIT_COMMON_DIR/git-franken/`. Shared
 across every worktree, never committed. Lines starting with `#` are comments;
 `#` elsewhere is part of a branch name, since git allows it.
 
-`trunk:` is optional. It defaults to whatever `origin/HEAD` names — normally
+`trunk:` is optional. It defaults to whatever `origin/HEAD` names, normally
 `origin/main`, **not** your local `main`, because a local trunk can sit behind
 the remote and building on it yields a tip that looks current and is not. Write
 `trunk: main` if you deliberately want the local branch; an explicit trunk is
@@ -151,7 +161,7 @@ inputs.git-franken.url = "github:fnune/git-franken";
 ```
 
 Anything named `git-franken` on `$PATH` is callable as `git franken`. Verify with
-`git franken help` — **not** `--help`, which git intercepts to look for a man
+`git franken help`, **not** `--help`, which git intercepts to look for a man
 page. The only runtime dependency is `git`.
 
 ### Agent skill
