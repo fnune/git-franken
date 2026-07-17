@@ -175,7 +175,12 @@ ln -s "$PWD/skills/building-frankenbranches" ~/.claude/skills/
 ## Development
 
 ```sh
-nix develop          # bats, shellcheck, shfmt, formatters, hooks
-bats tests/          # 49 tests
-nix flake check      # tests + shellcheck + formatting, against the built package
+nix develop          # bats, shellcheck, shfmt, formatters
+bats tests/          # 53 tests
+nix fmt              # format
+nix flake check      # tests + lint, against the built package
 ```
+
+`nixpkgs` is this flake's only input, so depending on `git-franken` costs you one
+lock entry and no `follows`. Dev tooling comes from `nixpkgs` directly rather
+than from flake wrappers, because inputs are inherited by every consumer.

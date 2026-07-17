@@ -1,28 +1,23 @@
 {
   description = "Rebuild disposable integration branches from a manifest";
 
-  inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
-    treefmt-nix = {
-      url = "github:numtide/treefmt-nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-    git-hooks = {
-      url = "github:cachix/git-hooks.nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-  };
+  # nixpkgs is deliberately the only input. Dev tooling (formatters, linters)
+  # comes from nixpkgs directly rather than from flake wrappers, because a flake
+  # input is inherited by every consumer: extra inputs here would force everyone
+  # installing this package to either fetch our dev tooling or `follows` it away.
+  inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
 
   outputs = {
     self,
     nixpkgs,
-    treefmt-nix,
-    git-hooks,
   }: let
     systems = ["x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin"];
     forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
-    treefmtEval = forAllSystems (pkgs: treefmt-nix.lib.evalModule pkgs ./treefmt.nix);
+    formatters = pkgs: [pkgs.alejandra pkgs.shfmt pkgs.prettier];
+
+    # bats parses `@test "..." { }`, which shfmt cannot.
+    shellFiles = "git-franken tests/*.bash";
   in {
     packages = forAllSystems (pkgs: rec {
       default = git-franken;
@@ -37,25 +32,36 @@
       };
     });
 
-    formatter = forAllSystems (pkgs: treefmtEval.${pkgs.system}.config.build.wrapper);
+    formatter = forAllSystems (pkgs:
+      pkgs.writeShellApplication {
+        name = "fmt";
+        runtimeInputs = formatters pkgs;
+        text = ''
+          cd "''${1:-.}"
+          alejandra --quiet .
+          # shellcheck disable=SC2086
+          shfmt --write --indent 2 ${shellFiles}
+          prettier --write --log-level warn '**/*.{md,json}'
+        '';
+      });
 
     checks = forAllSystems (pkgs: {
-      formatting = treefmtEval.${pkgs.system}.config.build.check self;
+      lint =
+        pkgs.runCommand "git-franken-lint" {
+          nativeBuildInputs = formatters pkgs ++ [pkgs.shellcheck];
+        } ''
+          cp -r ${nixpkgs.lib.cleanSource ./.}/. work
+          chmod -R +w work
+          cd work
 
-      pre-commit = git-hooks.lib.${pkgs.system}.run {
-        src = ./.;
-        hooks = {
-          treefmt = {
-            enable = true;
-            package = treefmtEval.${pkgs.system}.config.build.wrapper;
-          };
-          shellcheck = {
-            enable = true;
-            args = ["--severity=style"];
-          };
-          deadnix.enable = true;
-        };
-      };
+          shellcheck --severity=style ${shellFiles}
+          # shellcheck disable=SC2086
+          shfmt --diff --indent 2 ${shellFiles}
+          alejandra --check .
+          prettier --check --log-level warn '**/*.{md,json}'
+
+          touch "$out"
+        '';
 
       tests =
         pkgs.runCommand "git-franken-tests" {
@@ -74,10 +80,7 @@
 
     devShells = forAllSystems (pkgs: {
       default = pkgs.mkShell {
-        inherit (self.checks.${pkgs.system}.pre-commit) shellHook;
-        buildInputs =
-          self.checks.${pkgs.system}.pre-commit.enabledPackages
-          ++ [pkgs.bats pkgs.git pkgs.shellcheck pkgs.shfmt];
+        packages = formatters pkgs ++ [pkgs.bats pkgs.git pkgs.shellcheck];
       };
     });
   };
